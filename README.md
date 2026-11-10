@@ -1,93 +1,74 @@
-# HiSS-LM — Phase 1: Diagonal Kalman State-Space Cell
+# HiSS-LM Phase 2 — Hybrid Covariance Kalman Filter
 
-This is the first executable research primitive for HiSS-LM. It implements a
-learned, input-conditioned state transition and a differentiable diagonal
-Gaussian Kalman correction using PyTorch autograd.
+This phase implements the covariance representation
 
-## Requirements
+\[
+P = \operatorname{diag}(D) + UU^\top
+\]
 
-- Python 3.10+
-- PyTorch 2.x
-- pytest (for tests)
+and validates it against a dense full-covariance reference.
 
-Install PyTorch using the command appropriate for your CPU/CUDA environment:
-https://pytorch.org/get-started/locally/
+## Scope
 
-Then install pytest:
+- Dense prediction and Joseph-form correction for small dimensions.
+- Structured hybrid prediction with diagonal transition and process noise.
+- Structured Woodbury correction for identity observation operator and diagonal observation noise.
+- PyTorch autograd and float64 `gradcheck`.
+- A learned input-conditioned hybrid Kalman cell.
+- No hierarchy, tokenizer, LM head, or language-model training yet.
 
-```bash
-python -m pip install pytest
-```
+## Install and test (Windows PowerShell)
 
-## Run tests
-
-From this directory:
-
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python -m pytest -q
-```
-
-## Run the smoke test
-
-```bash
 python examples/smoke_test.py
 ```
 
-The smoke test unrolls the cell over a short synthetic sequence and performs
-one optimizer step. It is a differentiability/stability test, not language
-model training and not evidence of model quality.
+## Core API
 
-## Implemented equations
+```python
+from hiss.kalman import (
+    HybridGaussianState,
+    hybrid_predict,
+    hybrid_correct,
+    dense_predict,
+    dense_correct,
+    HybridKalmanCell,
+)
+```
 
-Prediction:
+`HybridGaussianState` stores:
+- `mean`: `[..., d]`
+- `variance`: `[..., d]`, positive diagonal component
+- `factor`: `[..., d, r]`
 
-\[
-m_t^- = a_t \odot m_{t-1} + b_t
-\]
+`state.covariance()` materializes a dense matrix for diagnostics only. Do not call it in the production recurrent hot path.
 
-\[
-P_t^- = a_t^2 \odot P_{t-1} + Q_t
-\]
+## Mathematical constraints
 
-Correction with adaptive confidence:
+Exact closure relies on:
+1. Diagonal state transition \(A=\operatorname{diag}(a)\).
+2. Diagonal process covariance \(Q=\operatorname{diag}(q)\).
+3. Identity observation operator \(H=I\).
+4. Diagonal observation covariance \(R\).
 
-\[
-R_{t,\mathrm{eff}} = R_t / (\rho_t + \epsilon)
-\]
+Under these assumptions, prediction and correction preserve rank at most `r` exactly. A non-diagonal observation operator, full process covariance, or cross-level joint covariance may not preserve this representation.
 
-\[
-K_t = P_t^- / (P_t^- + R_{t,\mathrm{eff}})
-\]
+## Numerical policy
 
-\[
-m_t = m_t^- + K_t \odot (y_t-m_t^-)
-\]
+- Covariance operations default to FP32 in `HybridKalmanCell`.
+- Dense reference tests use float64.
+- Cholesky factorization is applied only to the small `r x r` Woodbury matrix in the hybrid correction.
+- No explicit matrix inverse is used.
+- The implementation does not claim calibrated uncertainty or language-model quality.
 
-\[
-P_t = P_t^- \odot R_{t,\mathrm{eff}} /
-      (P_t^-+R_{t,\mathrm{eff}})
-\]
+## Phase 2 acceptance criteria
 
-All covariance quantities are diagonal variances. This version does not yet
-implement low-rank covariance, cross-level coupling, a tokenizer, a language
-model head, or a training corpus.
-
-## Important research limitations
-
-- The observation matrix is currently the identity in latent coordinates:
-  the observation projection maps the input directly to the state dimension.
-- The fast-level cell has no medium/slow context.
-- The confidence gate is learned from the current input only.
-- The diagonal covariance approximation ignores correlations between latent
-  dimensions.
-- The current implementation uses ordinary PyTorch autograd. Custom backward
-  kernels are deferred until numerical validation and profiling justify them.
-- The cell is a sequential reference implementation. It is not yet optimized
-  for throughput.
-
-## Suggested next step
-
-Validate the cell, then implement a dense small-dimensional Kalman reference
-and a hybrid diagonal-plus-low-rank covariance version. Compare the structured
-implementation against the dense reference before integrating it into the
-hierarchical model.
+- Structured prediction matches dense prediction.
+- Structured correction matches dense Joseph-form correction.
+- Posterior covariance is positive definite for positive diagonal components.
+- Gradients are finite and correction passes float64 `gradcheck`.
+- A short sequence unroll completes backward and an optimizer step.
